@@ -25,7 +25,13 @@ import time
 import os
 import re
 import numpy as np
-from fuzzywuzzy import fuzz
+try:
+    from fuzzywuzzy import fuzz
+except ImportError as e:
+    import streamlit as st
+    st.error(f"Failed to import fuzzywuzzy: {e}")
+    st.error("Please check requirements.txt is in the repo root")
+    st.stop()
 import logging
 import shutil
 import psutil
@@ -1378,4 +1384,5 @@ st.caption("""
 **CSV Query Tool v23** | 
 For large files (>200MB), run locally with `streamlit run streamlit_csv_query_app_v23.py` |
 [Report Issues](https://github.com/yourusername/csv-query-tool/issues)
+
 """)
