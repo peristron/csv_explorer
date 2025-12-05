@@ -1,0 +1,17 @@
+# Secrets
+.streamlit/secrets.toml
+
+# Data files (don't commit large CSVs)
+*.csv
+data/*.csv
+!data/sample_*.csv
+
+# Temp files
+temp_csv_query/
+downloads/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.env

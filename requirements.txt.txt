@@ -1,0 +1,20 @@
+# Core
+streamlit
+pandas
+numpy
+
+# DuckDB - faster SQL queries on CSV files
+duckdb
+
+# Fuzzy matching
+fuzzywuzzy
+python-Levenshtein
+
+# LangChain for natural language queries
+langchain
+langchain-core
+langchain-openai
+
+# System utilities
+psutil
+requests
