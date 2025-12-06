@@ -1,25 +1,7 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v23.py      cd c:\users\oakhtar\documents\pyprojs_local
 #
-# CLOUD-READY VERSION (v23)
-# - Removed hardcoded Windows paths
-# - Added file size limits for uploads
-# - Added memory-aware chunk sizing
-# - Added Streamlit secrets support
-# - Added result caching
-# - Added timeout protection (Unix)
-# - Optimized for Streamlit Community Cloud (works with files up to ~200MB)
-# - Still works locally for larger files
-#
-# For large files (30GB+), run locally or deploy to a cloud VM
-#
-# setup instructions:
-# 1. install libraries:
-#    pip install pandas fuzzywuzzy python-Levenshtein numpy langchain langchain-core langchain-openai psutil streamlit requests
-# 2. create .streamlit/secrets.toml with TOGETHER_API_KEY (optional)
-# 3. run: streamlit run streamlit_csv_query_app_v23.py
-#
-# run with: streamlit run streamlit_csv_query_app_v25.py
+# run with: streamlit run streamlit_csv_query_app_v27.py
 #
 import streamlit as st
 import pandas as pd
@@ -36,7 +18,6 @@ import gc
 from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
 
 try:
     from fuzzywuzzy import fuzz
@@ -409,7 +390,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v25", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v27", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -421,7 +402,7 @@ with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded
     1. **Upload** CSVs in sidebar.
     2. **Load Columns** to analyze schema.
     3. **Query** via AI, SQL, or Builder.
-    **Tip:** Use the 'Max Rows' limit to prevent crashes on large datasets.
+    **Tip:** Use the 'Max Rows' limit to prevent crashes on large datasets. Set to 0 for unlimited.
     """)
 
 # SIDEBAR
@@ -490,7 +471,7 @@ with st.sidebar:
             new_data = []
             start_char = len(st.session_state['dataset_configs'])
             
-            # VISUAL INDICATOR HERE
+            # VISUAL INDICATOR
             with st.status("📂 Processing Uploads...", expanded=True) as status:
                 for i, f in enumerate(files_to_process):
                     status.write(f"💾 Saving {f.name} ({f.size / (1024*1024):.1f} MB)...")
@@ -499,21 +480,19 @@ with st.sidebar:
                         st.error(f"❌ {f.name} too large (> {MAX_FILE_SIZE_MB}MB).")
                         continue
                     
-                    # Assign Dataset Letter (A, B, C...)
                     ds_name = chr(65 + start_char + i)
                     path = DOWNLOADS_DIR / f"{ds_name}_{f.name}"
-                    
-                    # Write to disk
                     path.write_bytes(f.getvalue())
                     new_data.append((str(path), ds_name))
-                    time.sleep(0.5) # Small buffer to let UI render
+                    time.sleep(0.5) 
                 
                 status.update(label="✅ Uploads Ready!", state="complete", expanded=False)
-                time.sleep(1) # Pause so user sees the success checkmark
+                time.sleep(1) 
             
             if new_data:
                 st.session_state['dataset_configs'].extend(new_data)
                 st.rerun()
+
     # --- DATASET LIST ---
     configs = st.session_state['dataset_configs']
     if configs:
@@ -534,7 +513,7 @@ with st.sidebar:
                 st.rerun()
 
 # ============================================================================
-# MAIN CONTENT
+# MAIN CONTENT (FIXED KEYS)
 # ============================================================================
 cols_dict = st.session_state['columns_dict']
 
@@ -547,10 +526,11 @@ else:
     with tab1:
         st.write("Ask questions in plain English.")
         c1, c2 = st.columns([3, 1])
-        nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100)
+        # Added key="ai_input"
+        nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100, key="ai_input")
         limit_ai = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = No Limit")
         
-        if st.button("Run AI Query", type="primary"):
+        if st.button("Run AI Query", type="primary", key="btn_ai"):
             if not st.session_state.get('authenticated'):
                 st.error("🔒 Please log in via Sidebar to use AI features.")
             else:
@@ -562,7 +542,6 @@ else:
                         datasets, join_cond, filter_cond = run_llm_parse(nl_query, cols_dict, config)
                     
                     if datasets:
-                        # Convert 0 to None for "No Limit"
                         final_limit = limit_ai if limit_ai > 0 else None
                         res = query_csvs(configs, datasets, join_cond, filter_cond, 
                                        st.session_state['preprocess_columns'], 
@@ -574,10 +553,11 @@ else:
     # TAB 2: SQL QUERY
     with tab2:
         c1, c2 = st.columns([3, 1])
-        q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10")
+        # Added key="sql_input"
+        q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10", key="sql_input")
         limit_sql = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = No Limit")
 
-        if st.button("Run SQL"):
+        if st.button("Run SQL", key="btn_sql"):
             try:
                 ds, join, filt, out = parse_query_string(q_str, cols_dict)
                 final_limit = limit_sql if limit_sql > 0 else None
@@ -590,13 +570,13 @@ else:
     # TAB 3: BUILDER
     with tab3:
         c1, c2 = st.columns(2)
-        sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()))
-        # UPDATED: Max value is now None (Infinity), default is 10,000
-        limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000)
+        # Added keys to builder widgets
+        sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()), key="builder_ds")
+        limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit")
         
         if sel_ds:
-            filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')")
-            if st.button("Run Builder"):
+            filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')", key="builder_filter")
+            if st.button("Run Builder", key="btn_builder"):
                 filt_conds = []
                 for line in filter_txt.split('\n'):
                     if line.strip():
@@ -609,40 +589,6 @@ else:
                 res = query_csvs(configs, sel_ds, detect_join_conditions(sel_ds, cols_dict), 
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
-                display_query_results(res, "builder_result")
-
-    # TAB 2: SQL
-    with tab2:
-        q_str = st.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10")
-        if st.button("Run SQL"):
-            try:
-                ds, join, filt, out = parse_query_string(q_str, cols_dict)
-                res = query_csvs(configs, ds, join, filt, st.session_state['preprocess_columns'], 
-                               get_safe_chunk_size(), 1000, out, MAX_TEMP_STORAGE_MB)
-                display_query_results(res, "sql_result")
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    # TAB 3: Interactive
-    with tab3:
-        c1, c2 = st.columns(2)
-        sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()))
-        limit = c2.number_input("Limit rows", 10, 1000, 100)
-        
-        if sel_ds:
-            filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')")
-            if st.button("Run Builder"):
-                filt_conds = []
-                for line in filter_txt.split('\n'):
-                    if line.strip():
-                        m = re.match(r'(\w+)\.(\w+)\s*([=!<>]+)\s*(.+)', line)
-                        if m:
-                            filt_conds.append({'dataset':m.group(1), 'column':m.group(2), 
-                                             'operator':m.group(3), 'value':m.group(4)})
-                
-                res = query_csvs(configs, sel_ds, detect_join_conditions(sel_ds, cols_dict), 
-                               filt_conds, st.session_state['preprocess_columns'],
-                               get_safe_chunk_size(), limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
 
 
