@@ -3,6 +3,9 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v27.py
 #
+#
+# run with: streamlit run streamlit_csv_query_app_v28.py
+#
 import streamlit as st
 import pandas as pd
 import time
@@ -220,7 +223,7 @@ JSON:"""
         # Estimate Cost
         estimate_cost(query_text + str(columns_info), content, config['price_in'], config['price_out'])
         
-        # Parse JSON (Handle markdown code blocks if the model adds them)
+        # Parse JSON (Handle markdown code blocks)
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
         elif "```" in content:
@@ -298,7 +301,14 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
         for i, ds_name in enumerate(datasets):
             status.write(f"Scanning dataset {ds_name} (chunk size: {chunk_size:,})...")
             fpath = path_map.get(ds_name)
-            use_cols = list(required_cols[ds_name]) or None
+            
+            # FIX v28: If output_cols is None (User wants everything), 
+            # force read of all columns by setting use_cols to None.
+            # Otherwise, use the restrictive list.
+            if output_cols is None:
+                use_cols = None
+            else:
+                use_cols = list(required_cols[ds_name]) or None
             
             for chunk in pd.read_csv(fpath, chunksize=chunk_size, usecols=use_cols, dtype=str, on_bad_lines='warn'):
                 # Preprocess
@@ -390,7 +400,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v27", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v28", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -459,11 +469,9 @@ with st.sidebar:
 
     # --- FILE UPLOAD SECTION ---
     st.divider()
-    # We use a key to allow clearing the uploader later if needed
     uploaded_files = st.file_uploader("Upload CSVs", accept_multiple_files=True, type="csv")
     
     if uploaded_files:
-        # Check which files are actually new (to prevent re-processing on rerun)
         existing_filenames = [Path(p).name.split('_', 1)[1] for p, _ in st.session_state['dataset_configs']]
         files_to_process = [f for f in uploaded_files if f.name not in existing_filenames]
         
@@ -471,21 +479,17 @@ with st.sidebar:
             new_data = []
             start_char = len(st.session_state['dataset_configs'])
             
-            # VISUAL INDICATOR
             with st.status("📂 Processing Uploads...", expanded=True) as status:
                 for i, f in enumerate(files_to_process):
                     status.write(f"💾 Saving {f.name} ({f.size / (1024*1024):.1f} MB)...")
-                    
                     if f.size / (1024*1024) > MAX_FILE_SIZE_MB:
                         st.error(f"❌ {f.name} too large (> {MAX_FILE_SIZE_MB}MB).")
                         continue
-                    
                     ds_name = chr(65 + start_char + i)
                     path = DOWNLOADS_DIR / f"{ds_name}_{f.name}"
                     path.write_bytes(f.getvalue())
                     new_data.append((str(path), ds_name))
                     time.sleep(0.5) 
-                
                 status.update(label="✅ Uploads Ready!", state="complete", expanded=False)
                 time.sleep(1) 
             
@@ -513,7 +517,7 @@ with st.sidebar:
                 st.rerun()
 
 # ============================================================================
-# MAIN CONTENT (FIXED KEYS)
+# MAIN CONTENT (FIXED JOIN UI)
 # ============================================================================
 cols_dict = st.session_state['columns_dict']
 
@@ -526,7 +530,6 @@ else:
     with tab1:
         st.write("Ask questions in plain English.")
         c1, c2 = st.columns([3, 1])
-        # Added key="ai_input"
         nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100, key="ai_input")
         limit_ai = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = No Limit")
         
@@ -553,7 +556,6 @@ else:
     # TAB 2: SQL QUERY
     with tab2:
         c1, c2 = st.columns([3, 1])
-        # Added key="sql_input"
         q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10", key="sql_input")
         limit_sql = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = No Limit")
 
@@ -567,15 +569,49 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # TAB 3: BUILDER
+    # TAB 3: BUILDER (UPDATED JOIN LOGIC)
     with tab3:
         c1, c2 = st.columns(2)
-        # Added keys to builder widgets
         sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()), key="builder_ds")
         limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit")
         
         if sel_ds:
+            # FIX v28: Interactive Join Selection
+            final_join_conds = []
+            
+            if len(sel_ds) > 1:
+                st.divider()
+                st.markdown("##### 🔗 Join Settings")
+                
+                # Compare adjacent datasets (A->B, B->C)
+                for i in range(len(sel_ds) - 1):
+                    ds1, ds2 = sel_ds[i], sel_ds[i+1]
+                    
+                    # Find common columns for these two datasets
+                    cols1 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds1][0]}
+                    cols2 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds2][0]}
+                    common_keys = list(set(cols1.keys()) & set(cols2.keys()))
+                    
+                    if common_keys:
+                        # Allow user to select which column to join on
+                        common_names = [cols1[k] for k in common_keys]
+                        selected_join_col = st.selectbox(
+                            f"Join {ds1} and {ds2} on:", 
+                            common_names, 
+                            key=f"join_{ds1}_{ds2}"
+                        )
+                        # Reconstruct the specific mapping
+                        key_norm = re.sub(r'\W+', '', selected_join_col.lower())
+                        final_join_conds.append((f"{ds1}.{cols1[key_norm]}", f"{ds2}.{cols2[key_norm]}"))
+                    else:
+                        st.warning(f"⚠️ No common columns found between {ds1} and {ds2}. This will result in 0 rows.")
+
+                if final_join_conds:
+                    st.info(f"Using join: {'; '.join([f'{l}={r}' for l,r in final_join_conds])}")
+
+            st.divider()
             filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')", key="builder_filter")
+            
             if st.button("Run Builder", key="btn_builder"):
                 filt_conds = []
                 for line in filter_txt.split('\n'):
@@ -586,9 +622,9 @@ else:
                                              'operator':m.group(3), 'value':m.group(4)})
                 
                 final_limit = limit if limit > 0 else None
-                res = query_csvs(configs, sel_ds, detect_join_conditions(sel_ds, cols_dict), 
+                
+                # Pass explicit None for output_cols so it reads ALL columns
+                res = query_csvs(configs, sel_ds, final_join_conds, 
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
-
-
