@@ -431,7 +431,7 @@ init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
 
-with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded=False):
+with st.expander("📚 User Guide & Data PRIVACY Warning (Read First)", expanded=False):
     st.warning("🛡️ DATA PRIVACY: Do not upload unmasked PII to Streamlit Cloud.")
     st.markdown("""
     **Usage:**
@@ -697,5 +697,6 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
 
 
