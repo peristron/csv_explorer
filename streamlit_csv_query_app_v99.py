@@ -478,23 +478,42 @@ with st.sidebar:
 
     # --- FILE UPLOAD SECTION ---
     st.divider()
+    # We use a key to allow clearing the uploader later if needed
     uploaded_files = st.file_uploader("Upload CSVs", accept_multiple_files=True, type="csv")
+    
     if uploaded_files:
-        new_data = []
-        start_char = len(st.session_state['dataset_configs'])
-        for i, f in enumerate(uploaded_files):
-            if f.size / (1024*1024) > MAX_FILE_SIZE_MB:
-                st.error(f"{f.name} too large.")
-                continue
-            ds_name = chr(65 + start_char + i)
-            path = DOWNLOADS_DIR / f"{ds_name}_{f.name}"
-            path.write_bytes(f.getvalue())
-            new_data.append((str(path), ds_name))
+        # Check which files are actually new (to prevent re-processing on rerun)
+        existing_filenames = [Path(p).name.split('_', 1)[1] for p, _ in st.session_state['dataset_configs']]
+        files_to_process = [f for f in uploaded_files if f.name not in existing_filenames]
         
-        if new_data:
-            st.session_state['dataset_configs'].extend(new_data)
-            st.rerun()
-
+        if files_to_process:
+            new_data = []
+            start_char = len(st.session_state['dataset_configs'])
+            
+            # VISUAL INDICATOR HERE
+            with st.status("📂 Processing Uploads...", expanded=True) as status:
+                for i, f in enumerate(files_to_process):
+                    status.write(f"💾 Saving {f.name} ({f.size / (1024*1024):.1f} MB)...")
+                    
+                    if f.size / (1024*1024) > MAX_FILE_SIZE_MB:
+                        st.error(f"❌ {f.name} too large (> {MAX_FILE_SIZE_MB}MB).")
+                        continue
+                    
+                    # Assign Dataset Letter (A, B, C...)
+                    ds_name = chr(65 + start_char + i)
+                    path = DOWNLOADS_DIR / f"{ds_name}_{f.name}"
+                    
+                    # Write to disk
+                    path.write_bytes(f.getvalue())
+                    new_data.append((str(path), ds_name))
+                    time.sleep(0.5) # Small buffer to let UI render
+                
+                status.update(label="✅ Uploads Ready!", state="complete", expanded=False)
+                time.sleep(1) # Pause so user sees the success checkmark
+            
+            if new_data:
+                st.session_state['dataset_configs'].extend(new_data)
+                st.rerun()
     # --- DATASET LIST ---
     configs = st.session_state['dataset_configs']
     if configs:
@@ -579,3 +598,4 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
