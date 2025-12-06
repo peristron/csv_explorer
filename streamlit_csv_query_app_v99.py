@@ -537,7 +537,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔗 Related Tools")
     st.info("Need deeper visualization or EDA - specific to Brightspace Datasets?")
-    st.link_button("📊 Launch Dataset Explorer", "https://datasetexplorerv2.streamlit.app/")
+    st.link_button("📊 Launch Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/")
 
 # ============================================================================
 # MAIN CONTENT
@@ -658,4 +658,5 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
 
