@@ -1,21 +1,7 @@
 #
-# run with: streamlit run streamlit_csv_query_app_v23.py      cd c:\users\oakhtar\documents\pyprojs_local
+# run with: streamlit run streamlit_csv_query_app_v23.py      cd c:\users\NAME\documents\pyprojs_local
 #
-# run with: streamlit run streamlit_csv_query_app_v27.py
-#
-#
-# run with: streamlit run streamlit_csv_query_app_v28.py
-#
-#
-# run with: streamlit run streamlit_csv_query_app_v29.py
-#
-#
-# run with: streamlit run streamlit_csv_query_app_v30.py
-#
-#
-# run with: streamlit run streamlit_csv_query_app_v31.py
-#
-# run with: streamlit run streamlit_csv_query_app_v32.py
+# run with: streamlit run streamlit_csv_query_app_v33.py
 #
 import streamlit as st
 import pandas as pd
@@ -74,7 +60,7 @@ def init_session_state():
         'columns_dict': {},
         'preprocess_columns': {},
         'interactive_state': {},
-        'sql_input_text': "", # Track SQL text for AI generation
+        'sql_input_text': "",
         # AI / Auth States
         'authenticated': False,
         'auth_error': False,
@@ -232,7 +218,6 @@ SQL:"""
         return f"Error generating SQL: {e}"
 
 def run_llm_parse(query_text, columns_dict, config):
-    """Execute LLM call to parse natural language to JSON structure"""
     try:
         llm = ChatOpenAI(
             model=config['model_name'],
@@ -275,7 +260,7 @@ JSON:"""
         # Estimate Cost
         estimate_cost(query_text + str(columns_info), content, config['price_in'], config['price_out'])
         
-        # Parse JSON (Handle markdown code blocks)
+        # Parse JSON
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
         elif "```" in content:
@@ -331,10 +316,7 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
     filtered_chunks = {ds: [] for ds in datasets}
     total_rows = 0
     
-    # Status Container for UX
     with st.status(f"🚀 Processing {len(datasets)} datasets...", expanded=True) as status:
-        
-        # 1. Prepare Columns
         status.write("Preparing Schema...")
         required_cols = {ds: set() for ds in datasets}
         for c in filter_conditions: 
@@ -349,19 +331,14 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                 required_cols[ds].add(col)
                 cols_to_return.append(col_spec)
 
-        # 2. Process Datasets
         for i, ds_name in enumerate(datasets):
             status.write(f"Scanning dataset {ds_name} (chunk size: {chunk_size:,})...")
             fpath = path_map.get(ds_name)
             
-            # If output_cols is None (User wants everything), read all columns
-            if output_cols is None:
-                use_cols = None
-            else:
-                use_cols = list(required_cols[ds_name]) or None
+            if output_cols is None: use_cols = None
+            else: use_cols = list(required_cols[ds_name]) or None
             
             for chunk in pd.read_csv(fpath, chunksize=chunk_size, usecols=use_cols, dtype=str, on_bad_lines='warn'):
-                # Preprocess
                 for col in chunk.columns:
                     key = f"{ds_name}.{col}"
                     if preprocess_cols.get(key) == 'numeric':
@@ -369,7 +346,6 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                     elif preprocess_cols.get(key) == 'datetime':
                         chunk[col] = pd.to_datetime(chunk[col], errors='coerce')
 
-                # Filter
                 mask = pd.Series(True, index=chunk.index)
                 for cond in [c for c in filter_conditions if c['dataset'] == ds_name]:
                     col, op, val = cond['column'], cond['operator'], cond['value']
@@ -393,10 +369,8 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                         total_rows += len(chunk)
                         if max_rows and total_rows >= max_rows: break
 
-        # 3. Merge or Stack
         result = pd.DataFrame()
         
-        # --- JOIN LOGIC ---
         if join_conditions:
             status.write("Merging/Joining filtered data...")
             if all(filtered_chunks.values()):
@@ -404,7 +378,6 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                 if base_chunks:
                     full_df = pd.concat(base_chunks)
                     full_df.columns = [f"{datasets[0]}.{c}" for c in full_df.columns]
-                    
                     for i in range(1, len(datasets)):
                         right_ds = datasets[i]
                         right_chunks = [pd.read_csv(f) for f in filtered_chunks[right_ds]]
@@ -412,25 +385,18 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                             full_df = pd.DataFrame(); break
                         right_df = pd.concat(right_chunks)
                         right_df.columns = [f"{right_ds}.{c}" for c in right_df.columns]
-                        
                         left_on, right_on = join_conditions[i-1] 
                         full_df = full_df.merge(right_df, left_on=left_on, right_on=right_on)
                     result = full_df
-        
-        # --- STACK/APPEND LOGIC ---
         else:
             status.write("Stacking/Appending results...")
             dfs = []
             for ds in datasets:
                 for item in filtered_chunks[ds]:
-                    if isinstance(item, pd.DataFrame):
-                        dfs.append(item)
-                    elif isinstance(item, str) or isinstance(item, Path):
-                         dfs.append(pd.read_csv(item))
-                         
+                    if isinstance(item, pd.DataFrame): dfs.append(item)
+                    elif isinstance(item, str) or isinstance(item, Path): dfs.append(pd.read_csv(item))
             if dfs: result = pd.concat(dfs, ignore_index=True)
 
-        # 4. Cleanup
         if not result.empty:
             if cols_to_return:
                 available = [c for c in cols_to_return if c in result.columns]
@@ -439,7 +405,6 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                 result = result.head(max_rows)
 
         status.update(label="✅ Processing Complete!", state="complete", expanded=False)
-        
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
         gc.collect()
         return result
@@ -461,12 +426,12 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v32", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v33", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
 
-with st.expander("📚 User Guide & Data PRIVACY Warning (Read First)", expanded=False):
+with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded=False):
     st.warning("🛡️ DATA PRIVACY: Do not upload unmasked PII to Streamlit Cloud.")
     st.markdown("""
     **Usage:**
@@ -552,7 +517,7 @@ with st.sidebar:
                     path.write_bytes(f.getvalue())
                     new_data.append((str(path), ds_name))
                     time.sleep(0.5) 
-                status.update(label="✅ Uploads Ready", state="complete", expanded=False)
+                status.update(label="✅ Uploads Ready!", state="complete", expanded=False)
                 time.sleep(1) 
             
             if new_data:
@@ -581,8 +546,10 @@ with st.sidebar:
     # --- CROSS LINK ---
     st.divider()
     st.markdown("### 🔗 Related Tools")
-    st.info("Need deeper visualization or EDA - specific to Brightspace Datasets?")
-    st.link_button("📊 Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/")
+    
+    st.link_button("📊 Dataset Explorer", "https://datasetexplorerv2.streamlit.app/", help="Visual EDA Tool")
+    # PLACEHOLDER: Replace the URL below with your actual Splitter App URL
+    st.link_button("✂️ CSV Splitter Utility", "YOUR_SPLITTER_URL_HERE", help="Split large files")
 
 # ============================================================================
 # MAIN CONTENT
@@ -593,11 +560,10 @@ configs = st.session_state['dataset_configs']
 if not cols_dict:
     st.info("👈 Please upload files and click 'Load Columns' to start.")
 else:
-    # --- NEW FEATURE: DATA PREVIEW & SCHEMA ---
+    # --- FEATURE: DATA PREVIEW ---
     with st.expander("👀 Data Preview & Schema (First 3 Rows)", expanded=False):
         for path, ds_name in configs:
             try:
-                # Read only header and 3 rows
                 preview_df = pd.read_csv(path, nrows=3, dtype=str)
                 st.markdown(f"**Dataset {ds_name}:** `{os.path.basename(path)}` ({len(preview_df.columns)} columns)")
                 st.dataframe(preview_df, use_container_width=True)
@@ -634,7 +600,7 @@ else:
                     else:
                         st.error("AI could not interpret the query.")
 
-    # TAB 2: SQL QUERY (UPDATED WITH AI INTELLIGENCE)
+    # TAB 2: SQL QUERY
     with tab2:
         # AI ASSIST SECTION
         with st.expander("✨ AI SQL Assistant (Help me write this)", expanded=False):
@@ -648,7 +614,6 @@ else:
                     if config.get('api_key'):
                         with st.spinner("Writing SQL..."):
                             generated_sql = generate_sql_query(ai_prompt, cols_dict, config)
-                            # Store in session state to populate text area
                             st.session_state['sql_input_text'] = generated_sql
                             st.rerun()
                     else:
@@ -656,17 +621,12 @@ else:
         
         # SQL INPUT
         c1, c2 = st.columns([3, 1])
-        
-        # Use session state value if available, else default
         default_sql = st.session_state.get('sql_input_text', "")
         if not default_sql:
-             # Pre-fill a basic template if empty
              first_ds = list(cols_dict.keys())[0]
              default_sql = f"SELECT * FROM {first_ds} WHERE {first_ds}.ColumnName > 0"
 
         q_str = c1.text_area("SQL Query:", value=default_sql, height=150, key="sql_input")
-        
-        # Update session state when user types manually
         if q_str != st.session_state.get('sql_input_text', ""):
             st.session_state['sql_input_text'] = q_str
 
@@ -737,4 +697,3 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
-
