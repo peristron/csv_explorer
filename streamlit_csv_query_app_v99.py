@@ -395,6 +395,34 @@ init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
 
+# ============================================================================
+# USER GUIDE & WARNINGS
+# ============================================================================
+with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded=False):
+    st.warning(
+        """
+        **🛡️ DATA PRIVACY WARNING:** 
+        You are uploading files to a cloud environment. 
+        **Do not upload real PII (Personally Identifiable Information)** such as Social Security Numbers, 
+        Patient IDs, or unmasked financial data. Please hash or obfuscate sensitive columns *before* uploading.
+        """
+    )
+    
+    st.markdown("""
+    ### 🚀 How to use this app
+    1.  **Upload Data:** Use the Sidebar (left) to upload one or more CSV files.
+    2.  **Analyze:** Click the **"Load Columns"** button in the sidebar. This scans the headers so the app knows what fields exist.
+    3.  **Query:** Choose your method in the main tabs:
+        *   **🗣️ AI Query:** Ask questions like *"Show me rows where Status is Active"* (Requires API Key).
+        *   **📝 SQL Query:** Use standard syntax like `SELECT * FROM A WHERE A.Score > 50`.
+        *   **🔨 Builder:** Point-and-click interface to filter data without code.
+    4.  **Download:** If rows match your query, a "Download CSV" button will appear.
+
+    ### 💡 Performance Tips
+    *   **Use Limits:** Keep "Max rows" set to 100 or 1000 while testing queries to prevent memory crashes.
+    *   **Filtering:** This app is designed to *filter* haystacks to find needles. Trying to display 1 million rows will crash the browser.
+    """)
+
 # SIDEBAR
 with st.sidebar:
     st.header("⚙️ Setup")
@@ -496,3 +524,4 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
