@@ -15,6 +15,8 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v31.py
 #
+# run with: streamlit run streamlit_csv_query_app_v32.py
+#
 import streamlit as st
 import pandas as pd
 import time
@@ -72,6 +74,7 @@ def init_session_state():
         'columns_dict': {},
         'preprocess_columns': {},
         'interactive_state': {},
+        'sql_input_text': "", # Track SQL text for AI generation
         # AI / Auth States
         'authenticated': False,
         'auth_error': False,
@@ -187,6 +190,46 @@ def detect_join_conditions(datasets, columns_dict, interactive=False):
 # ============================================================================
 # QUERY ENGINE & LLM
 # ============================================================================
+
+def generate_sql_query(user_prompt, columns_dict, config):
+    """Generate SQL string from natural language prompt"""
+    try:
+        llm = ChatOpenAI(
+            model=config['model_name'],
+            api_key=config['api_key'],
+            base_url=config['base_url'],
+            temperature=0
+        )
+
+        columns_info = {ds: cols[0] for ds, cols in columns_dict.items()}
+        
+        prompt = PromptTemplate(
+            input_variables=["query", "columns_info"],
+            template="""You are a SQL assistant for a specific CSV tool.
+The tool uses this syntax: "SELECT A.ColName, B.ColName FROM A JOIN B ON A.Id = B.Id WHERE A.Val > 10"
+Available Datasets and Columns: {columns_info}
+
+Task: Convert this natural language request into the specific SQL syntax.
+Request: "{query}"
+
+Rules:
+1. Always use the format DatasetName.ColumnName (e.g., A.UserId).
+2. Only output the SQL string. No markdown, no explanation.
+3. If no columns specified in SELECT, use *.
+4. Operators allowed: ==, !=, >, <, contains, like.
+
+SQL:"""
+        )
+        
+        chain = prompt | llm
+        response = chain.invoke({"query": user_prompt, "columns_info": str(columns_info)})
+        content = response.content.strip().replace('```sql', '').replace('```', '')
+        
+        estimate_cost(user_prompt + str(columns_info), content, config['price_in'], config['price_out'])
+        return content
+
+    except Exception as e:
+        return f"Error generating SQL: {e}"
 
 def run_llm_parse(query_text, columns_dict, config):
     """Execute LLM call to parse natural language to JSON structure"""
@@ -418,7 +461,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v31", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v32", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -429,7 +472,8 @@ with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded
     **Usage:**
     1. **Upload** CSVs in sidebar.
     2. **Load Columns** to analyze schema.
-    3. **Query** via AI, SQL, or Builder.
+    3. **Preview Data** using the expander below.
+    4. **Query** via AI, SQL, or Builder.
     **Tip:** Use the 'Max Rows' limit to prevent crashes on large datasets. Set to 0 for unlimited.
     """)
 
@@ -537,17 +581,30 @@ with st.sidebar:
     # --- CROSS LINK ---
     st.divider()
     st.markdown("### 🔗 Related Tools")
-    st.info("Need deeper visualization or EDA - specific to the Brightspace Datasets?")
+    st.info("Need deeper visualization or EDA?")
     st.link_button("📊 Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/")
 
 # ============================================================================
 # MAIN CONTENT
 # ============================================================================
 cols_dict = st.session_state['columns_dict']
+configs = st.session_state['dataset_configs']
 
 if not cols_dict:
     st.info("👈 Please upload files and click 'Load Columns' to start.")
 else:
+    # --- NEW FEATURE: DATA PREVIEW & SCHEMA ---
+    with st.expander("👀 Data Preview & Schema (First 3 Rows)", expanded=False):
+        for path, ds_name in configs:
+            try:
+                # Read only header and 3 rows
+                preview_df = pd.read_csv(path, nrows=3, dtype=str)
+                st.markdown(f"**Dataset {ds_name}:** `{os.path.basename(path)}` ({len(preview_df.columns)} columns)")
+                st.dataframe(preview_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"Could not preview {ds_name}: {e}")
+    
+    # --- TABS ---
     tab1, tab2, tab3 = st.tabs(["🗣️ AI Query", "📝 SQL Query", "🔨 Builder"])
     
     # TAB 1: AI QUERY
@@ -555,8 +612,7 @@ else:
         st.write("Ask questions in plain English.")
         c1, c2 = st.columns([3, 1])
         nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100, key="ai_input")
-        # UPDATED LABEL
-        limit_ai = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = All. If set, processing stops once this many rows are found across ALL datasets.")
+        limit_ai = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = All")
         
         if st.button("Run AI Query", type="primary", key="btn_ai"):
             if not st.session_state.get('authenticated'):
@@ -578,12 +634,43 @@ else:
                     else:
                         st.error("AI could not interpret the query.")
 
-    # TAB 2: SQL QUERY
+    # TAB 2: SQL QUERY (UPDATED WITH AI INTELLIGENCE)
     with tab2:
+        # AI ASSIST SECTION
+        with st.expander("✨ AI SQL Assistant (Help me write this)", expanded=False):
+            c_help_1, c_help_2 = st.columns([4, 1])
+            ai_prompt = c_help_1.text_input("Describe what you want to select:", placeholder="e.g., Select Name from Dataset A where Active is True")
+            if c_help_2.button("Generate SQL"):
+                if not st.session_state.get('authenticated'):
+                    st.error("Login required")
+                else:
+                    config = st.session_state['ai_provider_config']
+                    if config.get('api_key'):
+                        with st.spinner("Writing SQL..."):
+                            generated_sql = generate_sql_query(ai_prompt, cols_dict, config)
+                            # Store in session state to populate text area
+                            st.session_state['sql_input_text'] = generated_sql
+                            st.rerun()
+                    else:
+                        st.error("Missing API Key")
+        
+        # SQL INPUT
         c1, c2 = st.columns([3, 1])
-        q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10", key="sql_input")
-        # UPDATED LABEL
-        limit_sql = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = All. If set, processing stops once this many rows are found across ALL datasets.")
+        
+        # Use session state value if available, else default
+        default_sql = st.session_state.get('sql_input_text', "")
+        if not default_sql:
+             # Pre-fill a basic template if empty
+             first_ds = list(cols_dict.keys())[0]
+             default_sql = f"SELECT * FROM {first_ds} WHERE {first_ds}.ColumnName > 0"
+
+        q_str = c1.text_area("SQL Query:", value=default_sql, height=150, key="sql_input")
+        
+        # Update session state when user types manually
+        if q_str != st.session_state.get('sql_input_text', ""):
+            st.session_state['sql_input_text'] = q_str
+
+        limit_sql = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = All")
 
         if st.button("Run SQL", key="btn_sql"):
             try:
@@ -595,19 +682,17 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # TAB 3: BUILDER (UPDATED LABELS)
+    # TAB 3: BUILDER
     with tab3:
         c1, c2 = st.columns(2)
         sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()), key="builder_ds")
-        # UPDATED LABEL
-        limit = c2.number_input("Total Max Rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit", help="Global Limit. If Dataset A hits this limit, Dataset B will not be processed.")
+        limit = c2.number_input("Total Max Rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit", help="Global Limit.")
         
         if sel_ds:
             final_join_conds = []
             
             if len(sel_ds) > 1:
                 st.divider()
-                # Radio button to choose mode
                 combine_mode = st.radio(
                     "How do you want to combine these datasets?",
                     ["🔗 Join (Merge columns on Key)", "📚 Stack (Append rows vertically)"],
@@ -616,33 +701,24 @@ else:
                 
                 if "Join" in combine_mode:
                     st.markdown("##### 🔗 Join Settings")
-                    # Compare adjacent datasets (A->B, B->C)
                     for i in range(len(sel_ds) - 1):
                         ds1, ds2 = sel_ds[i], sel_ds[i+1]
-                        
-                        # Find common columns
                         cols1 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds1][0]}
                         cols2 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds2][0]}
                         common_keys = list(set(cols1.keys()) & set(cols2.keys()))
                         
                         if common_keys:
                             common_names = [cols1[k] for k in common_keys]
-                            selected_join_col = st.selectbox(
-                                f"Join {ds1} and {ds2} on:", 
-                                common_names, 
-                                key=f"join_{ds1}_{ds2}"
-                            )
+                            selected_join_col = st.selectbox(f"Join {ds1} and {ds2} on:", common_names, key=f"join_{ds1}_{ds2}")
                             key_norm = re.sub(r'\W+', '', selected_join_col.lower())
                             final_join_conds.append((f"{ds1}.{cols1[key_norm]}", f"{ds2}.{cols2[key_norm]}"))
                         else:
                             st.warning(f"⚠️ No common columns found between {ds1} and {ds2}.")
-                            
                     if final_join_conds:
                         st.info(f"Using join: {'; '.join([f'{l}={r}' for l,r in final_join_conds])}")
                 else:
-                    # Stack Mode
                     st.info("Datasets will be stacked one after another.")
-                    final_join_conds = [] # Ensure no join conditions are passed
+                    final_join_conds = []
 
             st.divider()
             filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')", key="builder_filter")
@@ -657,7 +733,6 @@ else:
                                              'operator':m.group(3), 'value':m.group(4)})
                 
                 final_limit = limit if limit > 0 else None
-                
                 res = query_csvs(configs, sel_ds, final_join_conds, 
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
