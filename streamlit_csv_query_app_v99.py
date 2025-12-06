@@ -6,6 +6,9 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v28.py
 #
+#
+# run with: streamlit run streamlit_csv_query_app_v29.py
+#
 import streamlit as st
 import pandas as pd
 import time
@@ -302,9 +305,7 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
             status.write(f"Scanning dataset {ds_name} (chunk size: {chunk_size:,})...")
             fpath = path_map.get(ds_name)
             
-            # FIX v28: If output_cols is None (User wants everything), 
-            # force read of all columns by setting use_cols to None.
-            # Otherwise, use the restrictive list.
+            # If output_cols is None (User wants everything), read all columns
             if output_cols is None:
                 use_cols = None
             else:
@@ -343,8 +344,10 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                         total_rows += len(chunk)
                         if max_rows and total_rows >= max_rows: break
 
-        # 3. Merge
+        # 3. Merge or Stack
         result = pd.DataFrame()
+        
+        # --- JOIN LOGIC ---
         if join_conditions:
             status.write("Merging/Joining filtered data...")
             if all(filtered_chunks.values()):
@@ -364,9 +367,20 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                         left_on, right_on = join_conditions[i-1] 
                         full_df = full_df.merge(right_df, left_on=left_on, right_on=right_on)
                     result = full_df
+        
+        # --- STACK/APPEND LOGIC ---
         else:
-            status.write("Compiling results...")
-            dfs = [df for ds in datasets for df in filtered_chunks[ds] if isinstance(df, pd.DataFrame)]
+            status.write("Stacking/Appending results...")
+            dfs = []
+            for ds in datasets:
+                for item in filtered_chunks[ds]:
+                    if isinstance(item, pd.DataFrame):
+                        dfs.append(item)
+                    elif isinstance(item, str) or isinstance(item, Path):
+                         # Should not happen in stack mode (we store DFs in memory for simple queries)
+                         # but handles fallback if logic changes
+                         dfs.append(pd.read_csv(item))
+                         
             if dfs: result = pd.concat(dfs, ignore_index=True)
 
         # 4. Cleanup
@@ -400,7 +414,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v28", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v29", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -517,7 +531,7 @@ with st.sidebar:
                 st.rerun()
 
 # ============================================================================
-# MAIN CONTENT (FIXED JOIN UI)
+# MAIN CONTENT (UPDATED BUILDER)
 # ============================================================================
 cols_dict = st.session_state['columns_dict']
 
@@ -569,45 +583,53 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # TAB 3: BUILDER (UPDATED JOIN LOGIC)
+    # TAB 3: BUILDER (UPDATED WITH JOIN VS STACK)
     with tab3:
         c1, c2 = st.columns(2)
         sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()), key="builder_ds")
         limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit")
         
         if sel_ds:
-            # FIX v28: Interactive Join Selection
             final_join_conds = []
             
             if len(sel_ds) > 1:
                 st.divider()
-                st.markdown("##### 🔗 Join Settings")
+                # Radio button to choose mode
+                combine_mode = st.radio(
+                    "How do you want to combine these datasets?",
+                    ["🔗 Join (Merge columns on Key)", "📚 Stack (Append rows vertically)"],
+                    key="combine_mode"
+                )
                 
-                # Compare adjacent datasets (A->B, B->C)
-                for i in range(len(sel_ds) - 1):
-                    ds1, ds2 = sel_ds[i], sel_ds[i+1]
-                    
-                    # Find common columns for these two datasets
-                    cols1 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds1][0]}
-                    cols2 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds2][0]}
-                    common_keys = list(set(cols1.keys()) & set(cols2.keys()))
-                    
-                    if common_keys:
-                        # Allow user to select which column to join on
-                        common_names = [cols1[k] for k in common_keys]
-                        selected_join_col = st.selectbox(
-                            f"Join {ds1} and {ds2} on:", 
-                            common_names, 
-                            key=f"join_{ds1}_{ds2}"
-                        )
-                        # Reconstruct the specific mapping
-                        key_norm = re.sub(r'\W+', '', selected_join_col.lower())
-                        final_join_conds.append((f"{ds1}.{cols1[key_norm]}", f"{ds2}.{cols2[key_norm]}"))
-                    else:
-                        st.warning(f"⚠️ No common columns found between {ds1} and {ds2}. This will result in 0 rows.")
-
-                if final_join_conds:
-                    st.info(f"Using join: {'; '.join([f'{l}={r}' for l,r in final_join_conds])}")
+                if "Join" in combine_mode:
+                    st.markdown("##### 🔗 Join Settings")
+                    # Compare adjacent datasets (A->B, B->C)
+                    for i in range(len(sel_ds) - 1):
+                        ds1, ds2 = sel_ds[i], sel_ds[i+1]
+                        
+                        # Find common columns
+                        cols1 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds1][0]}
+                        cols2 = {re.sub(r'\W+', '', c.lower()): c for c in cols_dict[ds2][0]}
+                        common_keys = list(set(cols1.keys()) & set(cols2.keys()))
+                        
+                        if common_keys:
+                            common_names = [cols1[k] for k in common_keys]
+                            selected_join_col = st.selectbox(
+                                f"Join {ds1} and {ds2} on:", 
+                                common_names, 
+                                key=f"join_{ds1}_{ds2}"
+                            )
+                            key_norm = re.sub(r'\W+', '', selected_join_col.lower())
+                            final_join_conds.append((f"{ds1}.{cols1[key_norm]}", f"{ds2}.{cols2[key_norm]}"))
+                        else:
+                            st.warning(f"⚠️ No common columns found between {ds1} and {ds2}.")
+                            
+                    if final_join_conds:
+                        st.info(f"Using join: {'; '.join([f'{l}={r}' for l,r in final_join_conds])}")
+                else:
+                    # Stack Mode
+                    st.info("Datasets will be stacked one after another.")
+                    final_join_conds = [] # Ensure no join conditions are passed
 
             st.divider()
             filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')", key="builder_filter")
@@ -623,7 +645,6 @@ else:
                 
                 final_limit = limit if limit > 0 else None
                 
-                # Pass explicit None for output_cols so it reads ALL columns
                 res = query_csvs(configs, sel_ds, final_join_conds, 
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
