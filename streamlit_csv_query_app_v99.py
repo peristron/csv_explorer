@@ -12,6 +12,9 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v30.py
 #
+#
+# run with: streamlit run streamlit_csv_query_app_v31.py
+#
 import streamlit as st
 import pandas as pd
 import time
@@ -380,8 +383,6 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                     if isinstance(item, pd.DataFrame):
                         dfs.append(item)
                     elif isinstance(item, str) or isinstance(item, Path):
-                         # Should not happen in stack mode (we store DFs in memory for simple queries)
-                         # but handles fallback if logic changes
                          dfs.append(pd.read_csv(item))
                          
             if dfs: result = pd.concat(dfs, ignore_index=True)
@@ -417,7 +418,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v30", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v31", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -536,8 +537,8 @@ with st.sidebar:
     # --- CROSS LINK ---
     st.divider()
     st.markdown("### 🔗 Related Tools")
-    st.info("Need deeper visualization or EDA - specific to Brightspace Datasets?")
-    st.link_button("📊 Launch Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/")
+    st.info("Need deeper visualization or EDA - specific to the Brightspace Datasets?")
+    st.link_button("📊 Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/")
 
 # ============================================================================
 # MAIN CONTENT
@@ -554,7 +555,8 @@ else:
         st.write("Ask questions in plain English.")
         c1, c2 = st.columns([3, 1])
         nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100, key="ai_input")
-        limit_ai = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = No Limit")
+        # UPDATED LABEL
+        limit_ai = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = All. If set, processing stops once this many rows are found across ALL datasets.")
         
         if st.button("Run AI Query", type="primary", key="btn_ai"):
             if not st.session_state.get('authenticated'):
@@ -580,7 +582,8 @@ else:
     with tab2:
         c1, c2 = st.columns([3, 1])
         q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10", key="sql_input")
-        limit_sql = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = No Limit")
+        # UPDATED LABEL
+        limit_sql = c2.number_input("Total Max Rows (Global)", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = All. If set, processing stops once this many rows are found across ALL datasets.")
 
         if st.button("Run SQL", key="btn_sql"):
             try:
@@ -592,11 +595,12 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # TAB 3: BUILDER (UPDATED WITH JOIN VS STACK)
+    # TAB 3: BUILDER (UPDATED LABELS)
     with tab3:
         c1, c2 = st.columns(2)
         sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()), key="builder_ds")
-        limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit")
+        # UPDATED LABEL
+        limit = c2.number_input("Total Max Rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000, key="builder_limit", help="Global Limit. If Dataset A hits this limit, Dataset B will not be processed.")
         
         if sel_ds:
             final_join_conds = []
@@ -658,5 +662,3 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
-
-
