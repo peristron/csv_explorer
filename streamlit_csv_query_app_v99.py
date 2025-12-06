@@ -547,7 +547,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔗 Related Tools")
     
-    st.link_button("📊 Dataset Explorer", "https://datasetexplorerv2.streamlit.app/", help="Visual EDA Tool")
+    st.link_button("📊 Brightspace Datasets Explorer", "https://datasetexplorerv2.streamlit.app/", help="Visual EDA Tool")
     # PLACEHOLDER: Replace the URL below with your actual Splitter App URL
     st.link_button("✂️ CSV Splitter Utility", "https://csvsplittertool.streamlit.app/", help="Split very large .csv files")
 
@@ -697,4 +697,5 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
 
