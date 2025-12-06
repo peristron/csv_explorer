@@ -536,7 +536,7 @@ with st.sidebar:
     # --- CROSS LINK ---
     st.divider()
     st.markdown("### 🔗 Related Tools")
-    st.info("Need deeper visualization or EDA?")
+    st.info("Need deeper visualization or EDA - specific to Brightspace Datasets?")
     st.link_button("📊 Launch Dataset Explorer", "https://datasetexplorerv2.streamlit.app/")
 
 # ============================================================================
@@ -658,3 +658,4 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
