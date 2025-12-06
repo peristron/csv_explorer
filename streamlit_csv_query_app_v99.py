@@ -9,6 +9,9 @@
 #
 # run with: streamlit run streamlit_csv_query_app_v29.py
 #
+#
+# run with: streamlit run streamlit_csv_query_app_v30.py
+#
 import streamlit as st
 import pandas as pd
 import time
@@ -414,7 +417,7 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v29", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v30", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
@@ -530,8 +533,14 @@ with st.sidebar:
                 st.session_state['preprocess_columns'] = pre
                 st.rerun()
 
+    # --- CROSS LINK ---
+    st.divider()
+    st.markdown("### 🔗 Related Tools")
+    st.info("Need deeper visualization or EDA?")
+    st.link_button("📊 Launch Dataset Explorer", "https://datasetexplorerv2.streamlit.app/")
+
 # ============================================================================
-# MAIN CONTENT (UPDATED BUILDER)
+# MAIN CONTENT
 # ============================================================================
 cols_dict = st.session_state['columns_dict']
 
