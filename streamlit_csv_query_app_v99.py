@@ -533,7 +533,9 @@ with st.sidebar:
                 st.session_state['preprocess_columns'] = pre
                 st.rerun()
 
+# ============================================================================
 # MAIN CONTENT
+# ============================================================================
 cols_dict = st.session_state['columns_dict']
 
 if not cols_dict:
@@ -541,10 +543,12 @@ if not cols_dict:
 else:
     tab1, tab2, tab3 = st.tabs(["🗣️ AI Query", "📝 SQL Query", "🔨 Builder"])
     
-    # TAB 1: AI
+    # TAB 1: AI QUERY
     with tab1:
         st.write("Ask questions in plain English.")
-        nl_query = st.text_area("Query:", placeholder="Show me datasets from A where Score > 50")
+        c1, c2 = st.columns([3, 1])
+        nl_query = c1.text_area("Query:", placeholder="Show me datasets from A where Score > 50", height=100)
+        limit_ai = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_ai", help="0 = No Limit")
         
         if st.button("Run AI Query", type="primary"):
             if not st.session_state.get('authenticated'):
@@ -558,12 +562,54 @@ else:
                         datasets, join_cond, filter_cond = run_llm_parse(nl_query, cols_dict, config)
                     
                     if datasets:
+                        # Convert 0 to None for "No Limit"
+                        final_limit = limit_ai if limit_ai > 0 else None
                         res = query_csvs(configs, datasets, join_cond, filter_cond, 
                                        st.session_state['preprocess_columns'], 
-                                       get_safe_chunk_size(), 1000, None, MAX_TEMP_STORAGE_MB)
+                                       get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
                         display_query_results(res, "ai_result")
                     else:
                         st.error("AI could not interpret the query.")
+
+    # TAB 2: SQL QUERY
+    with tab2:
+        c1, c2 = st.columns([3, 1])
+        q_str = c1.text_area("SQL Query:", height=100, placeholder="SELECT * FROM A WHERE A.Val > 10")
+        limit_sql = c2.number_input("Max Rows", min_value=0, value=5000, step=1000, key="limit_sql", help="0 = No Limit")
+
+        if st.button("Run SQL"):
+            try:
+                ds, join, filt, out = parse_query_string(q_str, cols_dict)
+                final_limit = limit_sql if limit_sql > 0 else None
+                res = query_csvs(configs, ds, join, filt, st.session_state['preprocess_columns'], 
+                               get_safe_chunk_size(), final_limit, out, MAX_TEMP_STORAGE_MB)
+                display_query_results(res, "sql_result")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # TAB 3: BUILDER
+    with tab3:
+        c1, c2 = st.columns(2)
+        sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()))
+        # UPDATED: Max value is now None (Infinity), default is 10,000
+        limit = c2.number_input("Limit rows (0 = All)", min_value=0, max_value=None, value=10000, step=1000)
+        
+        if sel_ds:
+            filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')")
+            if st.button("Run Builder"):
+                filt_conds = []
+                for line in filter_txt.split('\n'):
+                    if line.strip():
+                        m = re.match(r'(\w+)\.(\w+)\s*([=!<>]+)\s*(.+)', line)
+                        if m:
+                            filt_conds.append({'dataset':m.group(1), 'column':m.group(2), 
+                                             'operator':m.group(3), 'value':m.group(4)})
+                
+                final_limit = limit if limit > 0 else None
+                res = query_csvs(configs, sel_ds, detect_join_conditions(sel_ds, cols_dict), 
+                               filt_conds, st.session_state['preprocess_columns'],
+                               get_safe_chunk_size(), final_limit, None, MAX_TEMP_STORAGE_MB)
+                display_query_results(res, "builder_result")
 
     # TAB 2: SQL
     with tab2:
@@ -598,4 +644,5 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
+
 
