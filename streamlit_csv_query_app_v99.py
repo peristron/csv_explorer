@@ -18,9 +18,8 @@
 #    pip install pandas fuzzywuzzy python-Levenshtein numpy langchain langchain-core langchain-openai psutil streamlit requests
 # 2. create .streamlit/secrets.toml with TOGETHER_API_KEY (optional)
 # 3. run: streamlit run streamlit_csv_query_app_v23.py
-
 #
-# run with: streamlit run streamlit_csv_query_app_v24.py
+# run with: streamlit run streamlit_csv_query_app_v25.py
 #
 import streamlit as st
 import pandas as pd
@@ -33,11 +32,11 @@ import logging
 import json
 import requests
 import traceback
-import hashlib
 import gc
 from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
 
 try:
     from fuzzywuzzy import fuzz
@@ -60,20 +59,18 @@ TEMP_DIR = APP_DIR / "temp_csv_query"
 for d in [DATA_DIR, DOWNLOADS_DIR, TEMP_DIR]:
     d.mkdir(exist_ok=True)
 
-# Regex Patterns (Compiled once for speed)
+# Regex Patterns
 DATE_PATTERNS = [
     re.compile(r'^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}.*)?$', re.IGNORECASE),
     re.compile(r'^\d{2}/\d{2}/\d{4}$'),
     re.compile(r'^\d{4}/\d{2}/\d{2}$')
 ]
 NUMERIC_PATTERN = re.compile(r'^-?\d*\.?\d*$', re.IGNORECASE)
-JOIN_PATTERN = re.compile(r'(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)', re.IGNORECASE)
 
-# Logging
 logging.basicConfig(filename="bad_rows.log", level=logging.WARNING, format='%(asctime)s - %(message)s')
 
 # ============================================================================
-# UTILITY FUNCTIONS
+# SESSION STATE & UTILS
 # ============================================================================
 
 def init_session_state():
@@ -81,37 +78,50 @@ def init_session_state():
         'dataset_configs': [],
         'columns_dict': {},
         'preprocess_columns': {},
-        'api_key': '',
-        'interactive_state': {
-            'datasets': [], 'join_conditions': [], 'filter_conditions': [],
-            'output_columns': [], 'max_rows_to_return': 10, 'debug': False
-        }
+        'interactive_state': {},
+        # AI / Auth States
+        'authenticated': False,
+        'auth_error': False,
+        'total_tokens': 0,
+        'total_cost': 0.0,
+        'ai_provider_config': {}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-def get_api_key():
-    if st.session_state.get('api_key'): return st.session_state['api_key']
-    if os.getenv("TOGETHER_API_KEY"): return os.getenv("TOGETHER_API_KEY")
-    if "TOGETHER_API_KEY" in st.secrets: return st.secrets["TOGETHER_API_KEY"]
-    return None
+def perform_login():
+    """Callback for password validation"""
+    password = st.session_state.password_input
+    # Check against secrets.toml or default 'admin'
+    correct_password = st.secrets.get("auth_password", "admin")
+    
+    if password == correct_password:
+        st.session_state['authenticated'] = True
+        st.session_state['auth_error'] = False
+        st.session_state['password_input'] = "" # Clear input
+    else:
+        st.session_state['auth_error'] = True
+
+def logout():
+    st.session_state['authenticated'] = False
+
+def estimate_cost(input_str, output_str, price_in_per_m, price_out_per_m):
+    """Rough estimation of cost based on char count (4 chars ~= 1 token)"""
+    in_tokens = len(input_str) / 4
+    out_tokens = len(output_str) / 4
+    cost = (in_tokens / 1_000_000 * price_in_per_m) + (out_tokens / 1_000_000 * price_out_per_m)
+    
+    st.session_state['total_tokens'] += int(in_tokens + out_tokens)
+    st.session_state['total_cost'] += cost
 
 def get_safe_chunk_size():
     try:
-        # Use ~10% of available memory per chunk, assuming 500 bytes/row
         available_mem = psutil.virtual_memory().available
         safe_chunk = int((available_mem * 0.1) / 500)
         return max(10000, min(safe_chunk, 1000000))
     except:
         return DEFAULT_CHUNK_SIZE
-
-def check_memory_warning():
-    usage = psutil.virtual_memory().percent
-    if usage > 85:
-        st.warning(f"⚠️ High memory usage: {usage:.1f}%")
-    elif usage > 70:
-        st.info(f"ℹ️ Memory usage: {usage:.1f}%")
 
 def check_disk_space(path, required_mb):
     try:
@@ -125,31 +135,26 @@ def check_disk_space(path, required_mb):
 
 @st.cache_data(ttl=3600)
 def get_columns_and_samples(dataset_configs_tuple):
-    """Cached metadata extraction."""
     dataset_configs = list(dataset_configs_tuple)
     columns_dict = {}
     auto_preprocess = {}
 
     for file_path, dataset_name in dataset_configs:
         try:
-            # Read just enough to detect types
             df = pd.read_csv(file_path, nrows=100, engine='c', dtype=str, low_memory=False)
             columns = df.columns.tolist()
             sample_values = {}
-            
             for col in columns:
                 non_null = df[col][~df[col].isna() & (df[col] != '')]
                 val = non_null.iloc[0] if not non_null.empty else 'NaN'
                 sample_values[col] = val
                 
-                # Auto-detect types
                 key = f"{dataset_name}.{col}"
                 val_str = str(val)
                 if any(x in col.lower() for x in ['date', 'time']) or any(p.match(val_str) for p in DATE_PATTERNS):
                     auto_preprocess[key] = 'datetime'
                 elif NUMERIC_PATTERN.match(val_str) and col.lower() not in ['id', 'zip']:
                     auto_preprocess[key] = 'numeric'
-            
             columns_dict[dataset_name] = (columns, sample_values)
         except Exception as e:
             st.error(f"Error reading {dataset_name}: {e}")
@@ -157,13 +162,10 @@ def get_columns_and_samples(dataset_configs_tuple):
     return columns_dict, auto_preprocess
 
 def find_column(user_input, columns, threshold=70):
-    """Fuzzy match column names."""
     if user_input in columns: return user_input
-    # Exact match case-insensitive
     for col in columns:
         if col.lower() == user_input.lower(): return col
-        
-    # Fuzzy match
+    
     best_match, best_score = None, 0
     user_norm = user_input.lower().replace("_", "")
     for col in columns:
@@ -171,9 +173,7 @@ def find_column(user_input, columns, threshold=70):
         score = fuzz.token_sort_ratio(user_norm, col_norm)
         if score >= threshold and score > best_score:
             best_match, best_score = col, score
-            
-    if best_match:
-        return best_match
+    if best_match: return best_match
     raise ValueError(f"Column '{user_input}' not found.")
 
 def detect_join_conditions(datasets, columns_dict, interactive=False):
@@ -187,30 +187,78 @@ def detect_join_conditions(datasets, columns_dict, interactive=False):
         common = set(cols1.keys()) & set(cols2.keys())
         
         if common:
-            # Pick the first common column automatically for simplicity, or ask if interactive
             norm_col = list(common)[0]
             join_conditions.append((f"{ds1}.{cols1[norm_col]}", f"{ds2}.{cols2[norm_col]}"))
-            if interactive:
-                st.info(f"Auto-linking {ds1} and {ds2} on {cols1[norm_col]}")
-        elif interactive:
-            st.warning(f"No common columns detected between {ds1} and {ds2}. Please specify join manually.")
-            
     return join_conditions
 
 # ============================================================================
-# QUERY ENGINE
+# QUERY ENGINE & LLM
 # ============================================================================
+
+def run_llm_parse(query_text, columns_dict, config):
+    """Execute LLM call to parse natural language to JSON structure"""
+    try:
+        llm = ChatOpenAI(
+            model=config['model_name'],
+            api_key=config['api_key'],
+            base_url=config['base_url'],
+            temperature=0
+        )
+
+        columns_info = {ds: cols[0] for ds, cols in columns_dict.items()}
+        
+        prompt = PromptTemplate(
+            input_variables=["query", "columns_info"],
+            template="""You are a SQL expert converting natural language to structured JSON for a CSV query tool.
+Datasets and Columns available: {columns_info}
+
+Rules:
+1. Identify datasets (e.g., "A", "B").
+2. Identify join conditions if multiple datasets (e.g. "A.id = B.id").
+3. Identify filters. Operators: ==, !=, >, <, contains, like.
+4. Return ONLY JSON. No markdown formatting.
+
+Format:
+{{
+    "datasets": ["A", "B"],
+    "join_conditions": [["A.Id", "B.Id"]],
+    "filter_conditions": [
+        {{"dataset": "A", "column": "Score", "operator": ">", "value": 50}},
+        {{"dataset": "B", "column": "Name", "operator": "contains", "value": "John"}}
+    ]
+}}
+
+Query: "{query}"
+JSON:"""
+        )
+        
+        chain = prompt | llm
+        response = chain.invoke({"query": query_text, "columns_info": str(columns_info)})
+        content = response.content.strip()
+        
+        # Estimate Cost
+        estimate_cost(query_text + str(columns_info), content, config['price_in'], config['price_out'])
+        
+        # Parse JSON (Handle markdown code blocks if the model adds them)
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+            
+        parsed = json.loads(content)
+        return parsed.get('datasets', []), parsed.get('join_conditions', []), parsed.get('filter_conditions', [])
+
+    except Exception as e:
+        st.error(f"AI Error: {e}")
+        return [], [], []
 
 def parse_query_string(query_str, columns_dict):
     datasets, join_conditions, filter_conditions, output_columns = [], [], [], []
     
-    # Basic Regex Parsing for SQL-lite syntax
-    # 1. SELECT
     select_match = re.search(r'SELECT\s+(.+?)\s+FROM', query_str, re.IGNORECASE | re.DOTALL)
     if select_match and select_match.group(1).strip() != '*':
         output_columns = [c.strip() for c in select_match.group(1).split(',')]
 
-    # 2. FROM & JOIN
     from_match = re.search(r'FROM\s+(\w+)', query_str, re.IGNORECASE)
     if from_match: datasets.append(from_match.group(1).upper())
     
@@ -218,7 +266,6 @@ def parse_query_string(query_str, columns_dict):
         datasets.append(m.group(1).upper())
         join_conditions.append((m.group(2), m.group(3)))
 
-    # 3. WHERE
     where_match = re.search(r'WHERE\s+(.+)', query_str, re.IGNORECASE)
     if where_match:
         parts = re.split(r'\band\b', where_match.group(1), flags=re.IGNORECASE)
@@ -230,10 +277,8 @@ def parse_query_string(query_str, columns_dict):
                 if ds in columns_dict:
                     real_col = find_column(col, columns_dict[ds][0])
                     val = val.strip().strip("'\"")
-                    # Numeric conversion attempt
                     if op not in ['contains', 'like'] and val.replace('.','',1).isdigit():
                         val = float(val) if '.' in val else int(val)
-                    
                     filter_conditions.append({'dataset': ds, 'column': real_col, 'operator': op.lower(), 'value': val})
 
     if not datasets: raise ValueError("Missing FROM clause")
@@ -247,40 +292,34 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
     
     path_map = {name: path for path, name in dataset_configs}
     TEMP_DIR.mkdir(exist_ok=True)
-    
     filtered_chunks = {ds: [] for ds in datasets}
     total_rows = 0
     
-    # 1. Prepare Columns to Load
-    required_cols = {ds: set() for ds in datasets}
-    # Add filter columns
-    for c in filter_conditions: 
-        if c['dataset'] in datasets: required_cols[c['dataset']].add(c['column'])
-    # Add join columns
-    for l, r in join_conditions:
-        required_cols[l.split('.')[0]].add(l.split('.')[1])
-        required_cols[r.split('.')[0]].add(r.split('.')[1])
-    # Add output columns
-    cols_to_return = []
-    for col_spec in (output_cols or []):
-        ds, col = col_spec.split('.')
-        if ds in datasets:
-            required_cols[ds].add(col)
-            cols_to_return.append(col_spec)
+    # Status Container for UX
+    with st.status(f"🚀 Processing {len(datasets)} datasets...", expanded=True) as status:
+        
+        # 1. Prepare Columns
+        status.write("Preparing Schema...")
+        required_cols = {ds: set() for ds in datasets}
+        for c in filter_conditions: 
+            if c['dataset'] in datasets: required_cols[c['dataset']].add(c['column'])
+        for l, r in join_conditions:
+            required_cols[l.split('.')[0]].add(l.split('.')[1])
+            required_cols[r.split('.')[0]].add(r.split('.')[1])
+        cols_to_return = []
+        for col_spec in (output_cols or []):
+            ds, col = col_spec.split('.')
+            if ds in datasets:
+                required_cols[ds].add(col)
+                cols_to_return.append(col_spec)
 
-    # 2. Process Each Dataset
-    status = st.empty()
-    prog = st.progress(0)
-    
-    try:
+        # 2. Process Datasets
         for i, ds_name in enumerate(datasets):
-            status.text(f"Scanning {ds_name}...")
+            status.write(f"Scanning dataset {ds_name} (chunk size: {chunk_size:,})...")
             fpath = path_map.get(ds_name)
             use_cols = list(required_cols[ds_name]) or None
             
-            for chunk in pd.read_csv(fpath, chunksize=chunk_size, usecols=use_cols, 
-                                   dtype=str, on_bad_lines='warn'):
-                
+            for chunk in pd.read_csv(fpath, chunksize=chunk_size, usecols=use_cols, dtype=str, on_bad_lines='warn'):
                 # Preprocess
                 for col in chunk.columns:
                     key = f"{ds_name}.{col}"
@@ -294,7 +333,6 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                 for cond in [c for c in filter_conditions if c['dataset'] == ds_name]:
                     col, op, val = cond['column'], cond['operator'], cond['value']
                     if col not in chunk.columns: continue
-                    
                     series = chunk[col]
                     if op == '==': mask &= (series == val)
                     elif op == '!=': mask &= (series != val)
@@ -303,53 +341,44 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
                     elif op == 'contains': mask &= series.astype(str).str.contains(str(val), case=False, na=False)
                     
                 chunk = chunk[mask]
-                
                 if not chunk.empty:
                     if join_conditions:
-                        # Save temp file if joining
                         tpath = TEMP_DIR / f"{ds_name}_{len(filtered_chunks[ds_name])}.csv"
                         chunk.to_csv(tpath, index=False)
                         filtered_chunks[ds_name].append(tpath)
                     else:
-                        # Keep in memory if simple select
                         chunk.columns = [f"{ds_name}.{c}" for c in chunk.columns]
                         filtered_chunks[ds_name].append(chunk)
                         total_rows += len(chunk)
                         if max_rows and total_rows >= max_rows: break
-            
-            prog.progress((i+1) / len(datasets))
 
-        # 3. Merge or Concatenate
+        # 3. Merge
         result = pd.DataFrame()
-        
-        if join_conditions and all(filtered_chunks.values()):
-            status.text("Joining datasets...")
-            # Simplified join logic: Load first dataset chunks, merge others
-            # (In a real large-scale app, you'd merge iteratively on disk)
-            base_chunks = [pd.read_csv(f) for f in filtered_chunks[datasets[0]]]
-            if base_chunks:
-                full_df = pd.concat(base_chunks)
-                full_df.columns = [f"{datasets[0]}.{c}" for c in full_df.columns]
-                
-                for i in range(1, len(datasets)):
-                    right_ds = datasets[i]
-                    right_chunks = [pd.read_csv(f) for f in filtered_chunks[right_ds]]
-                    if not right_chunks: 
-                        full_df = pd.DataFrame() 
-                        break
-                    right_df = pd.concat(right_chunks)
-                    right_df.columns = [f"{right_ds}.{c}" for c in right_df.columns]
+        if join_conditions:
+            status.write("Merging/Joining filtered data...")
+            if all(filtered_chunks.values()):
+                base_chunks = [pd.read_csv(f) for f in filtered_chunks[datasets[0]]]
+                if base_chunks:
+                    full_df = pd.concat(base_chunks)
+                    full_df.columns = [f"{datasets[0]}.{c}" for c in full_df.columns]
                     
-                    # Find join condition
-                    left_on, right_on = join_conditions[i-1] # simplified assumptions
-                    full_df = full_df.merge(right_df, left_on=left_on, right_on=right_on)
-                
-                result = full_df
+                    for i in range(1, len(datasets)):
+                        right_ds = datasets[i]
+                        right_chunks = [pd.read_csv(f) for f in filtered_chunks[right_ds]]
+                        if not right_chunks: 
+                            full_df = pd.DataFrame(); break
+                        right_df = pd.concat(right_chunks)
+                        right_df.columns = [f"{right_ds}.{c}" for c in right_df.columns]
+                        
+                        left_on, right_on = join_conditions[i-1] 
+                        full_df = full_df.merge(right_df, left_on=left_on, right_on=right_on)
+                    result = full_df
         else:
+            status.write("Compiling results...")
             dfs = [df for ds in datasets for df in filtered_chunks[ds] if isinstance(df, pd.DataFrame)]
             if dfs: result = pd.concat(dfs, ignore_index=True)
 
-        # 4. Final Cleanup
+        # 4. Cleanup
         if not result.empty:
             if cols_to_return:
                 available = [c for c in cols_to_return if c in result.columns]
@@ -357,23 +386,13 @@ def query_csvs(dataset_configs, datasets, join_conditions, filter_conditions, pr
             if max_rows:
                 result = result.head(max_rows)
 
-        status.empty()
-        prog.empty()
+        status.update(label="✅ Processing Complete!", state="complete", expanded=False)
+        
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
-        gc.collect() # Force garbage collection
+        gc.collect()
         return result
 
-    except Exception as e:
-        st.error(f"Query failed: {e}")
-        status.empty()
-        return pd.DataFrame()
-
-# ============================================================================
-# DISPLAY HELPERS
-# ============================================================================
-
 def display_query_results(result_df, filename_prefix="results"):
-    """Standardized result display to save lines."""
     if not result_df.empty:
         st.success(f"✓ Found {len(result_df):,} rows")
         st.dataframe(result_df, use_container_width=True)
@@ -390,48 +409,75 @@ def display_query_results(result_df, filename_prefix="results"):
 # MAIN APP
 # ============================================================================
 
-st.set_page_config(page_title="CSV Query Tool v24", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="CSV Query Tool v25", page_icon="🔎", layout="wide")
 init_session_state()
 
 st.title("🔎 Large CSV Query Tool")
 
-# ============================================================================
-# USER GUIDE & WARNINGS
-# ============================================================================
 with st.expander("📚 User Guide & Data Privacy Warning (Read First)", expanded=False):
-    st.warning(
-        """
-        **🛡️ DATA PRIVACY WARNING:** 
-        You are uploading files to a cloud environment. 
-        **Do not upload real PII (Personally Identifiable Information)** such as Social Security Numbers, 
-        Patient IDs, or unmasked financial data. Please hash or obfuscate sensitive columns *before* uploading.
-        """
-    )
-    
+    st.warning("🛡️ DATA PRIVACY: Do not upload unmasked PII to Streamlit Cloud.")
     st.markdown("""
-    ### 🚀 How to use this app
-    1.  **Upload Data:** Use the Sidebar (left) to upload one or more CSV files.
-    2.  **Analyze:** Click the **"Load Columns"** button in the sidebar. This scans the headers so the app knows what fields exist.
-    3.  **Query:** Choose your method in the main tabs:
-        *   **🗣️ AI Query:** Ask questions like *"Show me rows where Status is Active"* (Requires API Key).
-        *   **📝 SQL Query:** Use standard syntax like `SELECT * FROM A WHERE A.Score > 50`.
-        *   **🔨 Builder:** Point-and-click interface to filter data without code.
-    4.  **Download:** If rows match your query, a "Download CSV" button will appear.
-
-    ### 💡 Performance Tips
-    *   **Use Limits:** Keep "Max rows" set to 100 or 1000 while testing queries to prevent memory crashes.
-    *   **Filtering:** This app is designed to *filter* haystacks to find needles. Trying to display 1 million rows will crash the browser.
+    **Usage:**
+    1. **Upload** CSVs in sidebar.
+    2. **Load Columns** to analyze schema.
+    3. **Query** via AI, SQL, or Builder.
+    **Tip:** Use the 'Max Rows' limit to prevent crashes on large datasets.
     """)
 
 # SIDEBAR
 with st.sidebar:
     st.header("⚙️ Setup")
     
-    # API Key
-    key_input = st.text_input("AI API Key (optional):", type="password", value=st.session_state['api_key'])
-    if key_input: st.session_state['api_key'] = key_input
+    # --- AUTHENTICATION SECTION ---
+    st.divider()
+    if st.session_state['authenticated']:
+        st.success("🔓 AI Features Unlocked")
+        
+        with st.expander("🤖 AI Settings", expanded=True):
+            ai_provider = st.radio("Provider", ["OpenAI (GPT-4o)", "xAI (Grok)"])
+            
+            if "OpenAI" in ai_provider:
+                api_key_name = "openai_api_key"
+                base_url = None 
+                model_name = "gpt-4o"
+                price_in, price_out = 2.50, 10.00
+            else:
+                api_key_name = "xai_api_key"
+                base_url = "https://api.x.ai/v1"
+                model_name = "grok-2-1212" 
+                price_in, price_out = 2.00, 10.00
 
-    # File Upload
+            model_name = st.text_input("Model", value=model_name)
+            api_key = st.secrets.get(api_key_name)
+            
+            # Save Config
+            st.session_state['ai_provider_config'] = {
+                'model_name': model_name,
+                'api_key': api_key,
+                'base_url': base_url,
+                'price_in': price_in,
+                'price_out': price_out
+            }
+
+        with st.expander("💰 Cost Estimator", expanded=False):
+            c1, c2 = st.columns(2)
+            c1.markdown(f"**Tokens:**\n{st.session_state['total_tokens']:,}")
+            c2.markdown(f"**Cost:**\n`${st.session_state['total_cost']:.5f}`")
+            if st.button("Reset Cost"):
+                st.session_state['total_cost'] = 0.0
+                st.session_state['total_tokens'] = 0
+                st.rerun()
+        
+        if st.button("Logout"):
+            logout()
+            st.rerun()
+    else:
+        with st.expander("🔐 AI Login (Locked)", expanded=True):
+            st.text_input("Password", type="password", key="password_input", on_change=perform_login)
+            if st.session_state['auth_error']: st.error("Incorrect password.")
+
+    # --- FILE UPLOAD SECTION ---
+    st.divider()
     uploaded_files = st.file_uploader("Upload CSVs", accept_multiple_files=True, type="csv")
     if uploaded_files:
         new_data = []
@@ -449,7 +495,7 @@ with st.sidebar:
             st.session_state['dataset_configs'].extend(new_data)
             st.rerun()
 
-    # Dataset Management
+    # --- DATASET LIST ---
     configs = st.session_state['dataset_configs']
     if configs:
         st.subheader("Loaded Datasets")
@@ -462,7 +508,7 @@ with st.sidebar:
             st.rerun()
             
         if st.button("Load Columns", type="primary"):
-            with st.spinner("Analyzing..."):
+            with st.spinner("Analyzing schema..."):
                 cols, pre = get_columns_and_samples(tuple(tuple(x) for x in configs))
                 st.session_state['columns_dict'] = cols
                 st.session_state['preprocess_columns'] = pre
@@ -478,15 +524,27 @@ else:
     
     # TAB 1: AI
     with tab1:
-        nl_query = st.text_area("Ask a question:", placeholder="Show me datasets from A where Score > 50")
-        if st.button("Run AI Query") and nl_query:
-            if not get_api_key():
-                st.error("API Key required.")
+        st.write("Ask questions in plain English.")
+        nl_query = st.text_area("Query:", placeholder="Show me datasets from A where Score > 50")
+        
+        if st.button("Run AI Query", type="primary"):
+            if not st.session_state.get('authenticated'):
+                st.error("🔒 Please log in via Sidebar to use AI features.")
             else:
-                # Simple parser logic placeholder - use your existing LLM logic here
-                # For brevity, I'm skipping the full LLM boilerplate, 
-                # but you would call parse_natural_language_query here.
-                st.info("Natural Language parser would run here (ensure API key is set).")
+                config = st.session_state['ai_provider_config']
+                if not config.get('api_key'):
+                    st.error("Missing API Key in secrets.")
+                else:
+                    with st.status("🤖 AI is thinking...", expanded=True):
+                        datasets, join_cond, filter_cond = run_llm_parse(nl_query, cols_dict, config)
+                    
+                    if datasets:
+                        res = query_csvs(configs, datasets, join_cond, filter_cond, 
+                                       st.session_state['preprocess_columns'], 
+                                       get_safe_chunk_size(), 1000, None, MAX_TEMP_STORAGE_MB)
+                        display_query_results(res, "ai_result")
+                    else:
+                        st.error("AI could not interpret the query.")
 
     # TAB 2: SQL
     with tab2:
@@ -495,23 +553,20 @@ else:
             try:
                 ds, join, filt, out = parse_query_string(q_str, cols_dict)
                 res = query_csvs(configs, ds, join, filt, st.session_state['preprocess_columns'], 
-                               get_safe_chunk_size(), 100, out, MAX_TEMP_STORAGE_MB)
+                               get_safe_chunk_size(), 1000, out, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "sql_result")
             except Exception as e:
                 st.error(f"Error: {e}")
 
     # TAB 3: Interactive
     with tab3:
-        st.write("Builder")
         c1, c2 = st.columns(2)
         sel_ds = c1.multiselect("Datasets", list(cols_dict.keys()))
-        limit = c2.number_input("Limit rows", 10, 1000, 10)
+        limit = c2.number_input("Limit rows", 10, 1000, 100)
         
-        # Dynamic filter builder
         if sel_ds:
             filter_txt = st.text_area("Filters (one per line, e.g. 'A.Score > 50')")
             if st.button("Run Builder"):
-                # Convert text area to conditions
                 filt_conds = []
                 for line in filter_txt.split('\n'):
                     if line.strip():
@@ -524,4 +579,3 @@ else:
                                filt_conds, st.session_state['preprocess_columns'],
                                get_safe_chunk_size(), limit, None, MAX_TEMP_STORAGE_MB)
                 display_query_results(res, "builder_result")
-
